@@ -1,0 +1,511 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using System.ComponentModel;
+using System.Collections.ObjectModel;
+
+namespace RpaWinUiComponentsPackage.AdvancedWinUiDataGrid;
+
+/// <summary>
+/// PUBLIC API: Sort direction enumeration
+/// </summary>
+public enum SortDirection
+{
+    None = 0,
+    Ascending = 1,
+    Descending = 2
+}
+
+/// <summary>
+/// PUBLIC API: Sort configuration for a column
+/// </summary>
+public sealed record SortColumnConfiguration
+{
+    public string ColumnName { get; init; } = string.Empty;
+    public SortDirection Direction { get; init; } = SortDirection.None;
+    public int Priority { get; init; } = 0;
+    public bool IsPrimary { get; init; } = false;
+    public Type? DataType { get; init; }
+    public IComparer<object?>? CustomComparer { get; init; }
+
+    public static SortColumnConfiguration Create(string columnName, SortDirection direction, int priority = 0) =>
+        new()
+        {
+            ColumnName = columnName,
+            Direction = direction,
+            Priority = priority,
+            IsPrimary = priority == 0
+        };
+
+    public static SortColumnConfiguration CreateWithComparer(string columnName, SortDirection direction, IComparer<object?> comparer, int priority = 0) =>
+        new()
+        {
+            ColumnName = columnName,
+            Direction = direction,
+            Priority = priority,
+            IsPrimary = priority == 0,
+            CustomComparer = comparer
+        };
+}
+
+/// <summary>
+/// PUBLIC API: Sort result information
+/// </summary>
+public sealed record SortResult
+{
+    public IReadOnlyList<IReadOnlyDictionary<string, object?>> SortedData { get; init; } = Array.Empty<IReadOnlyDictionary<string, object?>>();
+    public IReadOnlyList<SortColumnConfiguration> AppliedSorts { get; init; } = Array.Empty<SortColumnConfiguration>();
+    public TimeSpan SortTime { get; init; }
+    public int ProcessedRows { get; init; }
+    public bool UsedCustomComparer { get; init; }
+
+    public static SortResult Create(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> sortedData,
+        IReadOnlyList<SortColumnConfiguration> appliedSorts,
+        TimeSpan sortTime,
+        bool usedCustomComparer = false) =>
+        new()
+        {
+            SortedData = sortedData,
+            AppliedSorts = appliedSorts,
+            SortTime = sortTime,
+            ProcessedRows = sortedData.Count,
+            UsedCustomComparer = usedCustomComparer
+        };
+
+    public static SortResult Empty => new();
+}
+
+/// <summary>
+/// PUBLIC API: Sort configuration for the entire grid
+/// </summary>
+public sealed class SortConfiguration
+{
+    private readonly List<SortColumnConfiguration> _sortColumns = new();
+
+    /// <summary>Enable multi-column sorting</summary>
+    public bool AllowMultiColumnSort { get; set; } = true;
+
+    /// <summary>Maximum number of columns that can be sorted simultaneously</summary>
+    public int MaxSortColumns { get; set; } = 3;
+
+    /// <summary>Default sort direction when clicking unsorted column</summary>
+    public SortDirection DefaultSortDirection { get; set; } = SortDirection.Ascending;
+
+    /// <summary>Enable stable sorting (preserves order of equal elements)</summary>
+    public bool UseStableSort { get; set; } = true;
+
+    /// <summary>Case-sensitive string comparison</summary>
+    public bool CaseSensitiveStringSort { get; set; } = false;
+
+    /// <summary>Culture for string sorting</summary>
+    public string CultureName { get; set; } = "en-US";
+
+    /// <summary>Current sort columns in priority order</summary>
+    public IReadOnlyList<SortColumnConfiguration> SortColumns => _sortColumns.AsReadOnly();
+
+    /// <summary>Add or update sort for a column</summary>
+    public SortConfiguration SetColumnSort(string columnName, SortDirection direction, bool clearOthers = false)
+    {
+        if (clearOthers || !AllowMultiColumnSort)
+        {
+            _sortColumns.Clear();
+        }
+
+        var existing = _sortColumns.FirstOrDefault(s => s.ColumnName.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            _sortColumns.Remove(existing);
+        }
+
+        if (direction != SortDirection.None)
+        {
+            var priority = _sortColumns.Count;
+            if (priority >= MaxSortColumns)
+            {
+                // Remove least priority sort
+                _sortColumns.RemoveAt(_sortColumns.Count - 1);
+                priority = MaxSortColumns - 1;
+            }
+
+            _sortColumns.Insert(0, SortColumnConfiguration.Create(columnName, direction, priority));
+
+            // Update priorities
+            for (int i = 0; i < _sortColumns.Count; i++)
+            {
+                _sortColumns[i] = _sortColumns[i] with { Priority = i, IsPrimary = i == 0 };
+            }
+        }
+
+        return this;
+    }
+
+    /// <summary>Clear all sorts</summary>
+    public SortConfiguration ClearAllSorts()
+    {
+        _sortColumns.Clear();
+        return this;
+    }
+
+    /// <summary>Remove sort for specific column</summary>
+    public SortConfiguration RemoveColumnSort(string columnName)
+    {
+        var existing = _sortColumns.FirstOrDefault(s => s.ColumnName.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            _sortColumns.Remove(existing);
+
+            // Update priorities
+            for (int i = 0; i < _sortColumns.Count; i++)
+            {
+                _sortColumns[i] = _sortColumns[i] with { Priority = i, IsPrimary = i == 0 };
+            }
+        }
+        return this;
+    }
+
+    /// <summary>Toggle sort direction for column</summary>
+    public SortConfiguration ToggleColumnSort(string columnName)
+    {
+        var existing = _sortColumns.FirstOrDefault(s => s.ColumnName.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+        var newDirection = existing?.Direction switch
+        {
+            null or SortDirection.None => DefaultSortDirection,
+            SortDirection.Ascending => SortDirection.Descending,
+            SortDirection.Descending => SortDirection.None,
+            _ => DefaultSortDirection
+        };
+
+        return SetColumnSort(columnName, newDirection, !AllowMultiColumnSort);
+    }
+
+    /// <summary>Get sort direction for specific column</summary>
+    public SortDirection GetColumnSortDirection(string columnName)
+    {
+        return _sortColumns.FirstOrDefault(s => s.ColumnName.Equals(columnName, StringComparison.OrdinalIgnoreCase))?.Direction ?? SortDirection.None;
+    }
+
+    /// <summary>Get sort priority for specific column (0 = primary, -1 = not sorted)</summary>
+    public int GetColumnSortPriority(string columnName)
+    {
+        var sort = _sortColumns.FirstOrDefault(s => s.ColumnName.Equals(columnName, StringComparison.OrdinalIgnoreCase));
+        return sort?.Priority ?? -1;
+    }
+
+    /// <summary>Create default sort configuration</summary>
+    public static SortConfiguration Default => new();
+
+    /// <summary>Create single-column sort configuration</summary>
+    public static SortConfiguration SingleColumn => new()
+    {
+        AllowMultiColumnSort = false,
+        MaxSortColumns = 1
+    };
+
+    /// <summary>Create case-sensitive sort configuration</summary>
+    public static SortConfiguration CaseSensitive => new()
+    {
+        CaseSensitiveStringSort = true
+    };
+}
+
+/// <summary>
+/// INTERNAL: Advanced sorting engine with performance optimization
+/// PERFORMANCE: Optimized for large datasets with intelligent type detection
+/// </summary>
+internal sealed class SortEngine : IDisposable
+{
+    private readonly ILogger _logger;
+    private SortConfiguration _configuration;
+    private readonly Dictionary<Type, IComparer<object?>> _typeComparers = new();
+    private bool _disposed;
+
+    public SortEngine(ILogger logger, SortConfiguration? configuration = null)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _configuration = configuration ?? SortConfiguration.Default;
+
+        InitializeTypeComparers();
+        _logger.LogInformation("SORT: Engine initialized with multi-column={AllowMulti}, max-columns={MaxColumns}",
+            _configuration.AllowMultiColumnSort, _configuration.MaxSortColumns);
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Sort dataset by configured sort columns
+    /// PERFORMANCE: Multi-column stable sorting with type-aware comparison
+    /// </summary>
+    public async Task<SortResult> SortDataAsync(IReadOnlyList<IReadOnlyDictionary<string, object?>> data)
+    {
+        try
+        {
+            var startTime = DateTime.UtcNow;
+
+            if (data.Count == 0 || _configuration.SortColumns.Count == 0)
+            {
+                _logger.LogTrace("SORT: No data or no sort columns, returning original data");
+                return SortResult.Create(data, Array.Empty<SortColumnConfiguration>(), TimeSpan.Zero);
+            }
+
+            _logger.LogInformation("SORT: Starting sort operation for {RowCount} rows with {SortCount} columns",
+                data.Count, _configuration.SortColumns.Count);
+
+            // Create a copy for sorting to avoid modifying original
+            var sortableData = data.ToList();
+            var appliedSorts = _configuration.SortColumns.ToList();
+            bool usedCustomComparer = appliedSorts.Any(s => s.CustomComparer != null);
+
+            // Perform stable multi-column sort
+            if (_configuration.UseStableSort)
+            {
+                sortableData = SortStable(sortableData, appliedSorts);
+            }
+            else
+            {
+                sortableData = SortStandard(sortableData, appliedSorts);
+            }
+
+            var sortTime = DateTime.UtcNow - startTime;
+
+            _logger.LogInformation("SORT: Sort completed for {RowCount} rows in {Time}ms",
+                data.Count, sortTime.TotalMilliseconds);
+
+            return SortResult.Create(sortableData, appliedSorts, sortTime, usedCustomComparer);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SORT: Error during sort operation");
+            return SortResult.Create(data, Array.Empty<SortColumnConfiguration>(), TimeSpan.Zero);
+        }
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Sort specific column in dataset
+    /// CONVENIENCE: Quick single-column sort without configuration
+    /// </summary>
+    public async Task<SortResult> SortByColumnAsync(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> data,
+        string columnName,
+        SortDirection direction,
+        IComparer<object?>? customComparer = null)
+    {
+        try
+        {
+            var tempConfig = new SortConfiguration();
+            tempConfig.SetColumnSort(columnName, direction, clearOthers: true);
+
+            var originalConfig = _configuration;
+            _configuration = tempConfig;
+
+            var sortColumn = tempConfig.SortColumns.FirstOrDefault();
+            if (sortColumn != null && customComparer != null)
+            {
+                tempConfig.SetColumnSort(columnName, direction, clearOthers: true);
+                // Create new configuration with custom comparer
+                var sortWithComparer = SortColumnConfiguration.CreateWithComparer(columnName, direction, customComparer);
+                tempConfig._sortColumns.Clear();
+                tempConfig._sortColumns.Add(sortWithComparer);
+            }
+
+            var result = await SortDataAsync(data);
+
+            _configuration = originalConfig;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SORT: Error during single column sort for column {ColumnName}", columnName);
+            return SortResult.Create(data, Array.Empty<SortColumnConfiguration>(), TimeSpan.Zero);
+        }
+    }
+
+    /// <summary>
+    /// CONFIGURATION: Update sort configuration
+    /// </summary>
+    public void UpdateConfiguration(SortConfiguration configuration)
+    {
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _logger.LogInformation("SORT: Configuration updated");
+    }
+
+    private List<IReadOnlyDictionary<string, object?>> SortStable(
+        List<IReadOnlyDictionary<string, object?>> data,
+        IReadOnlyList<SortColumnConfiguration> sortColumns)
+    {
+        // Stable sort by applying sorts in reverse priority order
+        var orderedData = data.AsEnumerable();
+
+        for (int i = sortColumns.Count - 1; i >= 0; i--)
+        {
+            var sortColumn = sortColumns[i];
+            orderedData = ApplySingleColumnSort(orderedData, sortColumn);
+        }
+
+        return orderedData.ToList();
+    }
+
+    private List<IReadOnlyDictionary<string, object?>> SortStandard(
+        List<IReadOnlyDictionary<string, object?>> data,
+        IReadOnlyList<SortColumnConfiguration> sortColumns)
+    {
+        return data.OrderBy(row => row, new MultiColumnComparer(sortColumns, _typeComparers, _configuration)).ToList();
+    }
+
+    private IOrderedEnumerable<IReadOnlyDictionary<string, object?>> ApplySingleColumnSort(
+        IEnumerable<IReadOnlyDictionary<string, object?>> data,
+        SortColumnConfiguration sortColumn)
+    {
+        if (sortColumn.Direction == SortDirection.Ascending)
+        {
+            return data.OrderBy(row => GetSortValue(row, sortColumn), GetComparer(sortColumn));
+        }
+        else
+        {
+            return data.OrderByDescending(row => GetSortValue(row, sortColumn), GetComparer(sortColumn));
+        }
+    }
+
+    private object? GetSortValue(IReadOnlyDictionary<string, object?> row, SortColumnConfiguration sortColumn)
+    {
+        return row.TryGetValue(sortColumn.ColumnName, out var value) ? value : null;
+    }
+
+    private IComparer<object?> GetComparer(SortColumnConfiguration sortColumn)
+    {
+        if (sortColumn.CustomComparer != null)
+        {
+            return sortColumn.CustomComparer;
+        }
+
+        if (sortColumn.DataType != null && _typeComparers.TryGetValue(sortColumn.DataType, out var comparer))
+        {
+            return comparer;
+        }
+
+        return _typeComparers[typeof(object)];
+    }
+
+    private void InitializeTypeComparers()
+    {
+        // String comparer
+        var stringComparer = _configuration.CaseSensitiveStringSort
+            ? StringComparer.Ordinal
+            : StringComparer.OrdinalIgnoreCase;
+
+        _typeComparers[typeof(string)] = Comparer<object?>.Create((x, y) =>
+        {
+            if (x == null && y == null) return 0;
+            if (x == null) return -1;
+            if (y == null) return 1;
+            return stringComparer.Compare(x.ToString(), y.ToString());
+        });
+
+        // Numeric comparers
+        _typeComparers[typeof(int)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((int)a).CompareTo((int)b)));
+        _typeComparers[typeof(long)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((long)a).CompareTo((long)b)));
+        _typeComparers[typeof(double)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((double)a).CompareTo((double)b)));
+        _typeComparers[typeof(decimal)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((decimal)a).CompareTo((decimal)b)));
+        _typeComparers[typeof(float)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((float)a).CompareTo((float)b)));
+
+        // DateTime comparer
+        _typeComparers[typeof(DateTime)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((DateTime)a).CompareTo((DateTime)b)));
+        _typeComparers[typeof(DateTimeOffset)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((DateTimeOffset)a).CompareTo((DateTimeOffset)b)));
+
+        // Boolean comparer
+        _typeComparers[typeof(bool)] = Comparer<object?>.Create((x, y) => CompareNullable(x, y, (a, b) => ((bool)a).CompareTo((bool)b)));
+
+        // Default object comparer
+        _typeComparers[typeof(object)] = Comparer<object?>.Create((x, y) =>
+        {
+            if (x == null && y == null) return 0;
+            if (x == null) return -1;
+            if (y == null) return 1;
+
+            // Try to compare as strings
+            return stringComparer.Compare(x.ToString(), y.ToString());
+        });
+    }
+
+    private static int CompareNullable<T>(object? x, object? y, Func<T, T, int> comparer) where T : IComparable<T>
+    {
+        if (x == null && y == null) return 0;
+        if (x == null) return -1;
+        if (y == null) return 1;
+
+        if (x is T tx && y is T ty)
+        {
+            return comparer(tx, ty);
+        }
+
+        // Fallback to string comparison
+        return string.Compare(x.ToString(), y.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _typeComparers.Clear();
+        _logger.LogInformation("SORT: Engine disposed");
+        _disposed = true;
+    }
+}
+
+/// <summary>
+/// INTERNAL: Multi-column comparer for complex sorting scenarios
+/// </summary>
+internal sealed class MultiColumnComparer : IComparer<IReadOnlyDictionary<string, object?>>
+{
+    private readonly IReadOnlyList<SortColumnConfiguration> _sortColumns;
+    private readonly Dictionary<Type, IComparer<object?>> _typeComparers;
+    private readonly SortConfiguration _configuration;
+
+    public MultiColumnComparer(
+        IReadOnlyList<SortColumnConfiguration> sortColumns,
+        Dictionary<Type, IComparer<object?>> typeComparers,
+        SortConfiguration configuration)
+    {
+        _sortColumns = sortColumns;
+        _typeComparers = typeComparers;
+        _configuration = configuration;
+    }
+
+    public int Compare(IReadOnlyDictionary<string, object?>? x, IReadOnlyDictionary<string, object?>? y)
+    {
+        if (x == null && y == null) return 0;
+        if (x == null) return -1;
+        if (y == null) return 1;
+
+        foreach (var sortColumn in _sortColumns)
+        {
+            var xValue = x.TryGetValue(sortColumn.ColumnName, out var xVal) ? xVal : null;
+            var yValue = y.TryGetValue(sortColumn.ColumnName, out var yVal) ? yVal : null;
+
+            var comparer = GetComparer(sortColumn);
+            var result = comparer.Compare(xValue, yValue);
+
+            if (result != 0)
+            {
+                return sortColumn.Direction == SortDirection.Ascending ? result : -result;
+            }
+        }
+
+        return 0;
+    }
+
+    private IComparer<object?> GetComparer(SortColumnConfiguration sortColumn)
+    {
+        if (sortColumn.CustomComparer != null)
+        {
+            return sortColumn.CustomComparer;
+        }
+
+        if (sortColumn.DataType != null && _typeComparers.TryGetValue(sortColumn.DataType, out var comparer))
+        {
+            return comparer;
+        }
+
+        return _typeComparers[typeof(object)];
+    }
+}

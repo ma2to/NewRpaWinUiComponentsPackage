@@ -1,0 +1,508 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.UI.Xaml.Input;
+using Windows.System;
+using Microsoft.Extensions.Logging;
+
+namespace RpaWinUiComponentsPackage.AdvancedWinUiDataGrid;
+
+/// <summary>
+/// PUBLIC API: Keyboard shortcut actions
+/// </summary>
+public enum ShortcutAction
+{
+    // Navigation
+    NavigateUp,
+    NavigateDown,
+    NavigateLeft,
+    NavigateRight,
+    NavigateToFirstCell,
+    NavigateToLastCell,
+    NavigateToFirstRow,
+    NavigateToLastRow,
+
+    // Selection
+    SelectAll,
+    SelectRow,
+    SelectColumn,
+    ToggleSelection,
+    ExtendSelection,
+
+    // Editing
+    EnterEditMode,
+    ExitEditMode,
+    ConfirmEdit,
+    CancelEdit,
+    InsertNewLine, // Shift+Enter for multiline
+
+    // Cell Operations
+    DeleteCellContent,
+    DeleteRow,
+    InsertRow,
+    Copy,
+    Cut,
+    Paste,
+
+    // Grid Operations
+    ToggleSearchMode,
+    ToggleFilterMode,
+    ClearFilters,
+    Refresh,
+
+    // Special
+    ShowContextMenu,
+    Undo,
+    Redo
+}
+
+/// <summary>
+/// PUBLIC API: Keyboard shortcut definition
+/// </summary>
+public sealed record KeyboardShortcut
+{
+    public VirtualKey Key { get; init; }
+    public bool Ctrl { get; init; }
+    public bool Shift { get; init; }
+    public bool Alt { get; init; }
+    public ShortcutAction Action { get; init; }
+    public string? Description { get; init; }
+    public bool IsEnabled { get; init; } = true;
+
+    /// <summary>Create shortcut with Ctrl modifier</summary>
+    public static KeyboardShortcut Ctrl(VirtualKey key, ShortcutAction action, string? description = null) =>
+        new() { Key = key, Ctrl = true, Action = action, Description = description };
+
+    /// <summary>Create shortcut with Shift modifier</summary>
+    public static KeyboardShortcut Shift(VirtualKey key, ShortcutAction action, string? description = null) =>
+        new() { Key = key, Shift = true, Action = action, Description = description };
+
+    /// <summary>Create shortcut with Ctrl+Shift modifiers</summary>
+    public static KeyboardShortcut CtrlShift(VirtualKey key, ShortcutAction action, string? description = null) =>
+        new() { Key = key, Ctrl = true, Shift = true, Action = action, Description = description };
+
+    /// <summary>Create shortcut without modifiers</summary>
+    public static KeyboardShortcut Simple(VirtualKey key, ShortcutAction action, string? description = null) =>
+        new() { Key = key, Action = action, Description = description };
+
+    /// <summary>Get human-readable string representation</summary>
+    public string ToDisplayString()
+    {
+        var parts = new List<string>();
+        if (Ctrl) parts.Add("Ctrl");
+        if (Shift) parts.Add("Shift");
+        if (Alt) parts.Add("Alt");
+        parts.Add(Key.ToString());
+        return string.Join(" + ", parts);
+    }
+}
+
+/// <summary>
+/// PUBLIC API: Keyboard shortcut configuration
+/// ENTERPRISE: Comprehensive shortcut scheme for professional applications
+/// </summary>
+public sealed class KeyboardShortcutConfiguration
+{
+    private readonly Dictionary<string, KeyboardShortcut> _shortcuts = new();
+
+    public IReadOnlyDictionary<string, KeyboardShortcut> Shortcuts => _shortcuts;
+
+    /// <summary>Add or update a keyboard shortcut</summary>
+    public void AddShortcut(KeyboardShortcut shortcut)
+    {
+        var key = GetShortcutKey(shortcut);
+        _shortcuts[key] = shortcut;
+    }
+
+    /// <summary>Remove a keyboard shortcut</summary>
+    public bool RemoveShortcut(VirtualKey key, bool ctrl = false, bool shift = false, bool alt = false)
+    {
+        var shortcutKey = GetShortcutKey(key, ctrl, shift, alt);
+        return _shortcuts.Remove(shortcutKey);
+    }
+
+    /// <summary>Find shortcut by key combination</summary>
+    public KeyboardShortcut? FindShortcut(VirtualKey key, bool ctrl, bool shift, bool alt)
+    {
+        var shortcutKey = GetShortcutKey(key, ctrl, shift, alt);
+        return _shortcuts.TryGetValue(shortcutKey, out var shortcut) ? shortcut : null;
+    }
+
+    /// <summary>Create default Excel-like shortcuts</summary>
+    public static KeyboardShortcutConfiguration CreateDefault() => new KeyboardShortcutConfiguration()
+        .WithNavigationShortcuts()
+        .WithEditingShortcuts()
+        .WithSelectionShortcuts()
+        .WithDataOperationShortcuts()
+        .WithGridOperationShortcuts();
+
+    /// <summary>Create minimal shortcuts for basic operations</summary>
+    public static KeyboardShortcutConfiguration CreateMinimal() => new KeyboardShortcutConfiguration()
+        .WithBasicNavigationShortcuts()
+        .WithBasicEditingShortcuts();
+
+    private string GetShortcutKey(KeyboardShortcut shortcut) =>
+        GetShortcutKey(shortcut.Key, shortcut.Ctrl, shortcut.Shift, shortcut.Alt);
+
+    private string GetShortcutKey(VirtualKey key, bool ctrl, bool shift, bool alt) =>
+        $"{(ctrl ? "Ctrl+" : "")}{(shift ? "Shift+" : "")}{(alt ? "Alt+" : "")}{key}";
+}
+
+/// <summary>
+/// EXTENSION: Fluent API for shortcut configuration
+/// </summary>
+public static class KeyboardShortcutConfigurationExtensions
+{
+    /// <summary>Add navigation shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithNavigationShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        // Arrow key navigation
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Up, ShortcutAction.NavigateUp, "Move up"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Down, ShortcutAction.NavigateDown, "Move down"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Left, ShortcutAction.NavigateLeft, "Move left"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Right, ShortcutAction.NavigateRight, "Move right"));
+
+        // Advanced navigation
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.Home, ShortcutAction.NavigateToFirstCell, "Go to first cell"));
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.End, ShortcutAction.NavigateToLastCell, "Go to last cell"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Home, ShortcutAction.NavigateToFirstRow, "Go to first row"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.End, ShortcutAction.NavigateToLastRow, "Go to last row"));
+
+        // Tab navigation
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Tab, ShortcutAction.NavigateRight, "Next cell"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Tab, ShortcutAction.NavigateLeft, "Previous cell"));
+
+        return config;
+    }
+
+    /// <summary>Add basic navigation shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithBasicNavigationShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Up, ShortcutAction.NavigateUp, "Move up"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Down, ShortcutAction.NavigateDown, "Move down"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Left, ShortcutAction.NavigateLeft, "Move left"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Right, ShortcutAction.NavigateRight, "Move right"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Tab, ShortcutAction.NavigateRight, "Next cell"));
+        return config;
+    }
+
+    /// <summary>Add editing shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithEditingShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        // Edit mode
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Enter, ShortcutAction.ConfirmEdit, "Confirm edit"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Escape, ShortcutAction.CancelEdit, "Cancel edit"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Enter, ShortcutAction.InsertNewLine, "Insert new line"));
+
+        // Content operations
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Delete, ShortcutAction.DeleteCellContent, "Delete cell content"));
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.Delete, ShortcutAction.DeleteRow, "Delete row"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Insert, ShortcutAction.InsertRow, "Insert row"));
+
+        // Undo/Redo
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.Z, ShortcutAction.Undo, "Undo"));
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.Y, ShortcutAction.Redo, "Redo"));
+
+        return config;
+    }
+
+    /// <summary>Add basic editing shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithBasicEditingShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Enter, ShortcutAction.ConfirmEdit, "Confirm edit"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Escape, ShortcutAction.CancelEdit, "Cancel edit"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Delete, ShortcutAction.DeleteCellContent, "Delete cell content"));
+        return config;
+    }
+
+    /// <summary>Add selection shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithSelectionShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        // Selection
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.A, ShortcutAction.SelectAll, "Select all"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Space, ShortcutAction.SelectRow, "Select row"));
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.Space, ShortcutAction.SelectColumn, "Select column"));
+
+        // Extended selection with Shift + Arrow keys
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Up, ShortcutAction.ExtendSelection, "Extend selection up"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Down, ShortcutAction.ExtendSelection, "Extend selection down"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Left, ShortcutAction.ExtendSelection, "Extend selection left"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.Right, ShortcutAction.ExtendSelection, "Extend selection right"));
+
+        return config;
+    }
+
+    /// <summary>Add data operation shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithDataOperationShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        // Copy/Paste operations
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.C, ShortcutAction.Copy, "Copy"));
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.V, ShortcutAction.Paste, "Paste"));
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.X, ShortcutAction.Cut, "Cut"));
+
+        return config;
+    }
+
+    /// <summary>Add grid operation shortcuts</summary>
+    public static KeyboardShortcutConfiguration WithGridOperationShortcuts(this KeyboardShortcutConfiguration config)
+    {
+        // Search and filter
+        config.AddShortcut(KeyboardShortcut.Ctrl(VirtualKey.F, ShortcutAction.ToggleSearchMode, "Toggle search"));
+        config.AddShortcut(KeyboardShortcut.Shift(VirtualKey.L, ShortcutAction.ToggleFilterMode, "Toggle filter"));
+        config.AddShortcut(KeyboardShortcut.CtrlShift(VirtualKey.L, ShortcutAction.ClearFilters, "Clear filters"));
+
+        // General operations
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.F5, ShortcutAction.Refresh, "Refresh"));
+        config.AddShortcut(KeyboardShortcut.Simple(VirtualKey.Menu, ShortcutAction.ShowContextMenu, "Show context menu"));
+
+        return config;
+    }
+}
+
+/// <summary>
+/// INTERNAL: Keyboard shortcut handler engine
+/// PERFORMANCE: Optimized key processing with lookup tables
+/// </summary>
+internal sealed class KeyboardShortcutEngine : IDisposable
+{
+    private readonly ILogger _logger;
+    private readonly Dictionary<string, Func<Task<bool>>> _actionHandlers = new();
+    private KeyboardShortcutConfiguration _configuration;
+    private bool _disposed;
+
+    public KeyboardShortcutEngine(ILogger logger, KeyboardShortcutConfiguration? configuration = null)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _configuration = configuration ?? KeyboardShortcutConfiguration.CreateDefault();
+
+        _logger.LogInformation("KEYBOARD: Engine initialized with {ShortcutCount} shortcuts", _configuration.Shortcuts.Count);
+        InitializeDefaultHandlers();
+    }
+
+    /// <summary>Handle key press events</summary>
+    public async Task<bool> HandleKeyPressAsync(KeyRoutedEventArgs e)
+    {
+        try
+        {
+            var key = e.Key;
+            var ctrl = IsKeyPressed(VirtualKey.Control);
+            var shift = IsKeyPressed(VirtualKey.Shift);
+            var alt = IsKeyPressed(VirtualKey.Menu);
+
+            var shortcut = _configuration.FindShortcut(key, ctrl, shift, alt);
+            if (shortcut == null || !shortcut.IsEnabled)
+            {
+                return false; // Let the event continue
+            }
+
+            _logger.LogInformation("KEYBOARD: Processing shortcut {Shortcut} -> {Action}",
+                shortcut.ToDisplayString(), shortcut.Action);
+
+            var handlerKey = shortcut.Action.ToString();
+            if (_actionHandlers.TryGetValue(handlerKey, out var handler))
+            {
+                var handled = await handler();
+                if (handled)
+                {
+                    e.Handled = true;
+                    _logger.LogInformation("KEYBOARD: Shortcut {Shortcut} handled successfully", shortcut.ToDisplayString());
+                }
+                return handled;
+            }
+            else
+            {
+                _logger.LogWarning("KEYBOARD: No handler found for action {Action}", shortcut.Action);
+                return false;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "KEYBOARD: Error handling key press");
+            return false;
+        }
+    }
+
+    /// <summary>Register custom action handler</summary>
+    public void RegisterActionHandler(ShortcutAction action, Func<Task<bool>> handler)
+    {
+        _actionHandlers[action.ToString()] = handler;
+        _logger.LogInformation("KEYBOARD: Registered handler for action {Action}", action);
+    }
+
+    /// <summary>Update shortcut configuration</summary>
+    public void UpdateConfiguration(KeyboardShortcutConfiguration configuration)
+    {
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _logger.LogInformation("KEYBOARD: Configuration updated with {ShortcutCount} shortcuts", _configuration.Shortcuts.Count);
+    }
+
+    private void InitializeDefaultHandlers()
+    {
+        // Navigation handlers
+        RegisterActionHandler(ShortcutAction.NavigateUp, () => HandleNavigationAsync(-1, 0));
+        RegisterActionHandler(ShortcutAction.NavigateDown, () => HandleNavigationAsync(1, 0));
+        RegisterActionHandler(ShortcutAction.NavigateLeft, () => HandleNavigationAsync(0, -1));
+        RegisterActionHandler(ShortcutAction.NavigateRight, () => HandleNavigationAsync(0, 1));
+
+        // Editing handlers
+        RegisterActionHandler(ShortcutAction.ConfirmEdit, () => HandleConfirmEditAsync());
+        RegisterActionHandler(ShortcutAction.CancelEdit, () => HandleCancelEditAsync());
+        RegisterActionHandler(ShortcutAction.InsertNewLine, () => HandleInsertNewLineAsync());
+
+        // Data operation handlers
+        RegisterActionHandler(ShortcutAction.Copy, () => HandleCopyAsync());
+        RegisterActionHandler(ShortcutAction.Paste, () => HandlePasteAsync());
+        RegisterActionHandler(ShortcutAction.Cut, () => HandleCutAsync());
+
+        // Selection handlers
+        RegisterActionHandler(ShortcutAction.SelectAll, () => HandleSelectAllAsync());
+
+        // Grid operation handlers
+        RegisterActionHandler(ShortcutAction.ToggleSearchMode, () => HandleToggleSearchModeAsync());
+        RegisterActionHandler(ShortcutAction.ToggleFilterMode, () => HandleToggleFilterModeAsync());
+        RegisterActionHandler(ShortcutAction.Refresh, () => HandleRefreshAsync());
+
+        // Row operations
+        RegisterActionHandler(ShortcutAction.DeleteRow, () => HandleDeleteRowAsync());
+        RegisterActionHandler(ShortcutAction.InsertRow, () => HandleInsertRowAsync());
+        RegisterActionHandler(ShortcutAction.DeleteCellContent, () => HandleDeleteCellContentAsync());
+    }
+
+    #region Default Handler Implementations
+
+    private async Task<bool> HandleNavigationAsync(int rowDelta, int columnDelta)
+    {
+        // TODO: Implement navigation logic
+        _logger.LogInformation("KEYBOARD: Navigation delta row={RowDelta}, column={ColumnDelta}", rowDelta, columnDelta);
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleConfirmEditAsync()
+    {
+        // TODO: Implement confirm edit logic
+        _logger.LogInformation("KEYBOARD: Confirming edit");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleCancelEditAsync()
+    {
+        // TODO: Implement cancel edit logic
+        _logger.LogInformation("KEYBOARD: Canceling edit");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleInsertNewLineAsync()
+    {
+        // TODO: Implement multiline insert logic
+        _logger.LogInformation("KEYBOARD: Inserting new line");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleCopyAsync()
+    {
+        // TODO: Implement copy logic
+        _logger.LogInformation("KEYBOARD: Copying data");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandlePasteAsync()
+    {
+        // TODO: Implement paste logic
+        _logger.LogInformation("KEYBOARD: Pasting data");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleCutAsync()
+    {
+        // TODO: Implement cut logic
+        _logger.LogInformation("KEYBOARD: Cutting data");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleSelectAllAsync()
+    {
+        // TODO: Implement select all logic
+        _logger.LogInformation("KEYBOARD: Selecting all");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleToggleSearchModeAsync()
+    {
+        // TODO: Implement search mode toggle
+        _logger.LogInformation("KEYBOARD: Toggling search mode");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleToggleFilterModeAsync()
+    {
+        // TODO: Implement filter mode toggle
+        _logger.LogInformation("KEYBOARD: Toggling filter mode");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleRefreshAsync()
+    {
+        // TODO: Implement refresh logic
+        _logger.LogInformation("KEYBOARD: Refreshing grid");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleDeleteRowAsync()
+    {
+        // TODO: Implement delete row logic
+        _logger.LogInformation("KEYBOARD: Deleting row");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleInsertRowAsync()
+    {
+        // TODO: Implement insert row logic
+        _logger.LogInformation("KEYBOARD: Inserting row");
+        await Task.Delay(1);
+        return true;
+    }
+
+    private async Task<bool> HandleDeleteCellContentAsync()
+    {
+        // TODO: Implement delete cell content logic
+        _logger.LogInformation("KEYBOARD: Deleting cell content");
+        await Task.Delay(1);
+        return true;
+    }
+
+    #endregion
+
+    private bool IsKeyPressed(VirtualKey key)
+    {
+        try
+        {
+            var state = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(key);
+            return state.HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _actionHandlers.Clear();
+        _logger.LogInformation("KEYBOARD: Engine disposed");
+        _disposed = true;
+    }
+}

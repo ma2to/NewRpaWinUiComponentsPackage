@@ -1,0 +1,598 @@
+using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using System.Linq;
+using System.Collections.ObjectModel;
+using System.Threading;
+
+namespace RpaWinUiComponentsPackage.AdvancedWinUiDataGrid;
+
+/// <summary>
+/// PUBLIC API: Virtualization configuration for large datasets
+/// PERFORMANCE: 100k-10M row optimization with intelligent caching
+/// </summary>
+public sealed record VirtualizationConfiguration
+{
+    /// <summary>Enable data virtualization</summary>
+    public bool IsEnabled { get; init; } = true;
+
+    /// <summary>Number of rows to load per page</summary>
+    public int PageSize { get; init; } = 1000;
+
+    /// <summary>Maximum number of pages to keep in memory</summary>
+    public int MaxCachedPages { get; init; } = 10;
+
+    /// <summary>Number of rows to buffer before and after visible area</summary>
+    public int BufferSize { get; init; } = 500;
+
+    /// <summary>Enable preemptive loading of adjacent pages</summary>
+    public bool EnablePreemptiveLoading { get; init; } = true;
+
+    /// <summary>Interval for memory cleanup operations</summary>
+    public TimeSpan MemoryCleanupInterval { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>Maximum memory usage in MB before forcing cleanup</summary>
+    public int MaxMemoryUsageMB { get; init; } = 500;
+
+    /// <summary>Enable background data loading to reduce UI blocking</summary>
+    public bool EnableBackgroundLoading { get; init; } = true;
+
+    /// <summary>Timeout for data loading operations</summary>
+    public TimeSpan LoadingTimeout { get; init; } = TimeSpan.FromSeconds(30);
+
+    /// <summary>Create default configuration optimized for 100k rows</summary>
+    public static VirtualizationConfiguration Default => new();
+
+    /// <summary>Create configuration optimized for 1M+ rows</summary>
+    public static VirtualizationConfiguration LargeDataset => new()
+    {
+        PageSize = 2000,
+        MaxCachedPages = 15,
+        BufferSize = 1000,
+        MaxMemoryUsageMB = 1000
+    };
+
+    /// <summary>Create configuration optimized for 10M+ rows</summary>
+    public static VirtualizationConfiguration MassiveDataset => new()
+    {
+        PageSize = 5000,
+        MaxCachedPages = 20,
+        BufferSize = 2500,
+        MaxMemoryUsageMB = 2000
+    };
+
+    /// <summary>Create memory-efficient configuration for limited RAM</summary>
+    public static VirtualizationConfiguration MemoryEfficient => new()
+    {
+        PageSize = 500,
+        MaxCachedPages = 5,
+        BufferSize = 250,
+        MaxMemoryUsageMB = 200
+    };
+}
+
+/// <summary>
+/// PUBLIC API: Performance statistics for monitoring
+/// </summary>
+public sealed record PerformanceStatistics
+{
+    public long TotalRows { get; init; }
+    public int LoadedPages { get; init; }
+    public int CachedPages { get; init; }
+    public double MemoryUsageMB { get; init; }
+    public TimeSpan AveragePageLoadTime { get; init; }
+    public int CacheHitRatio { get; init; }
+    public DateTime LastCleanup { get; init; }
+    public int BackgroundLoadingQueueSize { get; init; }
+
+    public static PerformanceStatistics Create(long totalRows, int loadedPages, int cachedPages, double memoryUsage) =>
+        new()
+        {
+            TotalRows = totalRows,
+            LoadedPages = loadedPages,
+            CachedPages = cachedPages,
+            MemoryUsageMB = memoryUsage,
+            LastCleanup = DateTime.UtcNow
+        };
+}
+
+/// <summary>
+/// PUBLIC API: Data page for virtualization
+/// </summary>
+public sealed record DataPage
+{
+    public int PageIndex { get; init; }
+    public int StartRowIndex { get; init; }
+    public int EndRowIndex { get; init; }
+    public IReadOnlyList<IReadOnlyDictionary<string, object?>> Data { get; init; } = Array.Empty<IReadOnlyDictionary<string, object?>>();
+    public DateTime LoadedAt { get; init; }
+    public TimeSpan LoadTime { get; init; }
+    public bool IsFromCache { get; init; }
+
+    public static DataPage Create(int pageIndex, int startRow, int endRow, IReadOnlyList<IReadOnlyDictionary<string, object?>> data, TimeSpan loadTime = default, bool fromCache = false) =>
+        new()
+        {
+            PageIndex = pageIndex,
+            StartRowIndex = startRow,
+            EndRowIndex = endRow,
+            Data = data,
+            LoadedAt = DateTime.UtcNow,
+            LoadTime = loadTime,
+            IsFromCache = fromCache
+        };
+}
+
+/// <summary>
+/// PUBLIC API: Progress information for large data operations
+/// </summary>
+public sealed record LargeDataProgress
+{
+    public long ProcessedRows { get; init; }
+    public long TotalRows { get; init; }
+    public double CompletionPercentage => TotalRows > 0 ? (double)ProcessedRows / TotalRows * 100 : 0;
+    public TimeSpan ElapsedTime { get; init; }
+    public TimeSpan? EstimatedTimeRemaining { get; init; }
+    public string CurrentOperation { get; init; } = string.Empty;
+    public double ThroughputRowsPerSecond { get; init; }
+
+    public static LargeDataProgress Create(long processed, long total, TimeSpan elapsed, string operation = "") =>
+        new()
+        {
+            ProcessedRows = processed,
+            TotalRows = total,
+            ElapsedTime = elapsed,
+            CurrentOperation = operation,
+            ThroughputRowsPerSecond = elapsed.TotalSeconds > 0 ? processed / elapsed.TotalSeconds : 0
+        };
+}
+
+/// <summary>
+/// INTERNAL: Virtualized data provider for large datasets
+/// PERFORMANCE: Intelligent page loading with background optimization
+/// </summary>
+internal sealed class VirtualizedDataProvider : IDisposable
+{
+    private readonly ILogger _logger;
+    private readonly Dictionary<int, DataPage> _pageCache = new();
+    private readonly Queue<int> _backgroundLoadingQueue = new();
+    private readonly Timer _memoryCleanupTimer;
+    private readonly SemaphoreSlim _loadingSemaphore;
+    private VirtualizationConfiguration _configuration;
+    private IReadOnlyList<IReadOnlyDictionary<string, object?>> _fullDataset = Array.Empty<IReadOnlyDictionary<string, object?>>();
+    private int _totalPages;
+    private int _cacheHits;
+    private int _totalRequests;
+    private bool _disposed;
+
+    public VirtualizedDataProvider(ILogger logger, VirtualizationConfiguration? configuration = null)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _configuration = configuration ?? VirtualizationConfiguration.Default;
+        _loadingSemaphore = new SemaphoreSlim(3, 3); // Allow 3 concurrent page loads
+
+        // Setup memory cleanup timer
+        _memoryCleanupTimer = new Timer(PerformMemoryCleanup, null,
+            _configuration.MemoryCleanupInterval, _configuration.MemoryCleanupInterval);
+
+        _logger.LogInformation("VIRTUALIZATION: Provider initialized - Page size: {PageSize}, Max cached: {MaxPages}",
+            _configuration.PageSize, _configuration.MaxCachedPages);
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Initialize with dataset for virtualization
+    /// PERFORMANCE: Prepares data structure for efficient paging
+    /// </summary>
+    public async Task InitializeAsync(IReadOnlyList<IReadOnlyDictionary<string, object?>> dataset)
+    {
+        try
+        {
+            var startTime = DateTime.UtcNow;
+
+            _fullDataset = dataset ?? Array.Empty<IReadOnlyDictionary<string, object?>>();
+            _totalPages = (int)Math.Ceiling((double)_fullDataset.Count / _configuration.PageSize);
+
+            // Clear existing cache
+            _pageCache.Clear();
+            _cacheHits = 0;
+            _totalRequests = 0;
+
+            var initTime = DateTime.UtcNow - startTime;
+
+            _logger.LogInformation("VIRTUALIZATION: Initialized with {RowCount} rows, {PageCount} pages in {Time}ms",
+                _fullDataset.Count, _totalPages, initTime.TotalMilliseconds);
+
+            // Preload first page for immediate display
+            if (_totalPages > 0)
+            {
+                await LoadPageAsync(0);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VIRTUALIZATION: Error initializing data provider");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Get data page for specific row range
+    /// PERFORMANCE: Intelligent caching with background preloading
+    /// </summary>
+    public async Task<DataPage> GetPageAsync(int pageIndex)
+    {
+        try
+        {
+            _totalRequests++;
+
+            if (pageIndex < 0 || pageIndex >= _totalPages)
+            {
+                _logger.LogWarning("VIRTUALIZATION: Invalid page index {PageIndex}, total pages: {TotalPages}", pageIndex, _totalPages);
+                return DataPage.Create(pageIndex, 0, 0, Array.Empty<IReadOnlyDictionary<string, object?>>());
+            }
+
+            // Check cache first
+            if (_pageCache.TryGetValue(pageIndex, out var cachedPage))
+            {
+                _cacheHits++;
+                _logger.LogTrace("VIRTUALIZATION: Cache hit for page {PageIndex}", pageIndex);
+
+                // Schedule preemptive loading of adjacent pages
+                if (_configuration.EnablePreemptiveLoading)
+                {
+                    SchedulePreemptiveLoading(pageIndex);
+                }
+
+                return cachedPage with { IsFromCache = true };
+            }
+
+            // Load page
+            var page = await LoadPageAsync(pageIndex);
+
+            // Schedule preemptive loading
+            if (_configuration.EnablePreemptiveLoading)
+            {
+                SchedulePreemptiveLoading(pageIndex);
+            }
+
+            return page;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VIRTUALIZATION: Error getting page {PageIndex}", pageIndex);
+            return DataPage.Create(pageIndex, 0, 0, Array.Empty<IReadOnlyDictionary<string, object?>>());
+        }
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Get data for specific row range
+    /// CONVENIENCE: Direct row access with automatic page calculation
+    /// </summary>
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> GetRowsAsync(int startRow, int count)
+    {
+        try
+        {
+            var result = new List<IReadOnlyDictionary<string, object?>>();
+            var currentRow = startRow;
+            var remainingCount = count;
+
+            while (remainingCount > 0 && currentRow < _fullDataset.Count)
+            {
+                var pageIndex = currentRow / _configuration.PageSize;
+                var page = await GetPageAsync(pageIndex);
+
+                var rowIndexInPage = currentRow % _configuration.PageSize;
+                var rowsToTake = Math.Min(remainingCount, page.Data.Count - rowIndexInPage);
+
+                if (rowsToTake > 0)
+                {
+                    result.AddRange(page.Data.Skip(rowIndexInPage).Take(rowsToTake));
+                    currentRow += rowsToTake;
+                    remainingCount -= rowsToTake;
+                }
+                else
+                {
+                    break;
+                }
+            }
+
+            _logger.LogTrace("VIRTUALIZATION: Retrieved {RowCount} rows starting from {StartRow}", result.Count, startRow);
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VIRTUALIZATION: Error getting rows from {StartRow}, count: {Count}", startRow, count);
+            return Array.Empty<IReadOnlyDictionary<string, object?>>();
+        }
+    }
+
+    /// <summary>
+    /// MONITORING: Get current performance statistics
+    /// </summary>
+    public PerformanceStatistics GetPerformanceStatistics()
+    {
+        var memoryUsage = EstimateMemoryUsage();
+        var cacheHitRatio = _totalRequests > 0 ? (int)((double)_cacheHits / _totalRequests * 100) : 0;
+
+        return new PerformanceStatistics
+        {
+            TotalRows = _fullDataset.Count,
+            LoadedPages = _pageCache.Count,
+            CachedPages = _pageCache.Count,
+            MemoryUsageMB = memoryUsage,
+            CacheHitRatio = cacheHitRatio,
+            LastCleanup = DateTime.UtcNow,
+            BackgroundLoadingQueueSize = _backgroundLoadingQueue.Count
+        };
+    }
+
+    /// <summary>
+    /// CONFIGURATION: Update virtualization configuration
+    /// </summary>
+    public void UpdateConfiguration(VirtualizationConfiguration configuration)
+    {
+        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+
+        // Trigger memory cleanup if cache is too large
+        if (_pageCache.Count > _configuration.MaxCachedPages)
+        {
+            Task.Run(async () => await PerformMemoryCleanupAsync());
+        }
+
+        _logger.LogInformation("VIRTUALIZATION: Configuration updated");
+    }
+
+    private async Task<DataPage> LoadPageAsync(int pageIndex)
+    {
+        await _loadingSemaphore.WaitAsync(_configuration.LoadingTimeout);
+
+        try
+        {
+            var startTime = DateTime.UtcNow;
+            var startRow = pageIndex * _configuration.PageSize;
+            var endRow = Math.Min(startRow + _configuration.PageSize - 1, _fullDataset.Count - 1);
+
+            var pageData = _fullDataset.Skip(startRow).Take(_configuration.PageSize).ToList();
+            var loadTime = DateTime.UtcNow - startTime;
+
+            var page = DataPage.Create(pageIndex, startRow, endRow, pageData, loadTime);
+
+            // Add to cache
+            _pageCache[pageIndex] = page;
+
+            // Check if we need to cleanup memory
+            if (_pageCache.Count > _configuration.MaxCachedPages)
+            {
+                await RemoveOldestPagesAsync();
+            }
+
+            _logger.LogTrace("VIRTUALIZATION: Loaded page {PageIndex} with {RowCount} rows in {Time}ms",
+                pageIndex, pageData.Count, loadTime.TotalMilliseconds);
+
+            return page;
+        }
+        finally
+        {
+            _loadingSemaphore.Release();
+        }
+    }
+
+    private void SchedulePreemptiveLoading(int currentPageIndex)
+    {
+        if (!_configuration.EnableBackgroundLoading) return;
+
+        // Schedule loading of next page
+        var nextPage = currentPageIndex + 1;
+        if (nextPage < _totalPages && !_pageCache.ContainsKey(nextPage) && !_backgroundLoadingQueue.Contains(nextPage))
+        {
+            _backgroundLoadingQueue.Enqueue(nextPage);
+        }
+
+        // Schedule loading of previous page
+        var prevPage = currentPageIndex - 1;
+        if (prevPage >= 0 && !_pageCache.ContainsKey(prevPage) && !_backgroundLoadingQueue.Contains(prevPage))
+        {
+            _backgroundLoadingQueue.Enqueue(prevPage);
+        }
+
+        // Process background loading queue
+        if (_backgroundLoadingQueue.Count > 0)
+        {
+            Task.Run(ProcessBackgroundLoadingQueue);
+        }
+    }
+
+    private async Task ProcessBackgroundLoadingQueue()
+    {
+        while (_backgroundLoadingQueue.Count > 0 && !_disposed)
+        {
+            if (_backgroundLoadingQueue.TryDequeue(out var pageIndex))
+            {
+                try
+                {
+                    if (!_pageCache.ContainsKey(pageIndex))
+                    {
+                        await LoadPageAsync(pageIndex);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "VIRTUALIZATION: Background loading failed for page {PageIndex}", pageIndex);
+                }
+            }
+        }
+    }
+
+    private async Task RemoveOldestPagesAsync()
+    {
+        while (_pageCache.Count > _configuration.MaxCachedPages)
+        {
+            var oldestPage = _pageCache.Values.OrderBy(p => p.LoadedAt).First();
+            _pageCache.Remove(oldestPage.PageIndex);
+
+            _logger.LogTrace("VIRTUALIZATION: Removed page {PageIndex} from cache", oldestPage.PageIndex);
+        }
+
+        await Task.CompletedTask;
+    }
+
+    private double EstimateMemoryUsage()
+    {
+        // Rough estimation: assume each row uses ~1KB
+        var estimatedBytes = _pageCache.Sum(kvp => kvp.Value.Data.Count * 1024);
+        return estimatedBytes / (1024.0 * 1024.0); // Convert to MB
+    }
+
+    private async void PerformMemoryCleanup(object? state)
+    {
+        try
+        {
+            await PerformMemoryCleanupAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "VIRTUALIZATION: Error during memory cleanup");
+        }
+    }
+
+    private async Task PerformMemoryCleanupAsync()
+    {
+        if (_disposed) return;
+
+        var memoryUsage = EstimateMemoryUsage();
+        if (memoryUsage > _configuration.MaxMemoryUsageMB)
+        {
+            var pagesToRemove = _pageCache.Count / 4; // Remove 25% of pages
+            var oldestPages = _pageCache.Values.OrderBy(p => p.LoadedAt).Take(pagesToRemove).ToList();
+
+            foreach (var page in oldestPages)
+            {
+                _pageCache.Remove(page.PageIndex);
+            }
+
+            _logger.LogInformation("VIRTUALIZATION: Memory cleanup removed {PageCount} pages, memory usage: {MemoryMB:F1}MB",
+                pagesToRemove, memoryUsage);
+        }
+
+        await Task.CompletedTask;
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _memoryCleanupTimer?.Dispose();
+        _loadingSemaphore?.Dispose();
+        _pageCache.Clear();
+        _backgroundLoadingQueue.Clear();
+
+        _logger.LogInformation("VIRTUALIZATION: Provider disposed");
+        _disposed = true;
+    }
+}
+
+/// <summary>
+/// INTERNAL: Performance optimization engine
+/// ENTERPRISE: Comprehensive optimization for large datasets
+/// </summary>
+internal sealed class PerformanceOptimizationEngine : IDisposable
+{
+    private readonly ILogger _logger;
+    private VirtualizedDataProvider? _virtualizedProvider;
+    private VirtualizationConfiguration _virtualizationConfig;
+    private bool _disposed;
+
+    public PerformanceOptimizationEngine(ILogger logger, VirtualizationConfiguration? virtualizationConfig = null)
+    {
+        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _virtualizationConfig = virtualizationConfig ?? VirtualizationConfiguration.Default;
+
+        _logger.LogInformation("PERFORMANCE: Optimization engine initialized");
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Enable virtualization for large datasets
+    /// </summary>
+    public async Task EnableVirtualizationAsync(IReadOnlyList<IReadOnlyDictionary<string, object?>> dataset)
+    {
+        try
+        {
+            _virtualizedProvider?.Dispose();
+            _virtualizedProvider = new VirtualizedDataProvider(_logger.CreateScope("VirtualizedProvider"), _virtualizationConfig);
+
+            await _virtualizedProvider.InitializeAsync(dataset);
+
+            _logger.LogInformation("PERFORMANCE: Virtualization enabled for {RowCount} rows", dataset.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "PERFORMANCE: Failed to enable virtualization");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Get virtualized data page
+    /// </summary>
+    public async Task<DataPage> GetPageAsync(int pageIndex)
+    {
+        if (_virtualizedProvider == null)
+        {
+            throw new InvalidOperationException("Virtualization not enabled. Call EnableVirtualizationAsync first.");
+        }
+
+        return await _virtualizedProvider.GetPageAsync(pageIndex);
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Get rows with virtualization
+    /// </summary>
+    public async Task<IReadOnlyList<IReadOnlyDictionary<string, object?>>> GetRowsAsync(int startRow, int count)
+    {
+        if (_virtualizedProvider == null)
+        {
+            throw new InvalidOperationException("Virtualization not enabled. Call EnableVirtualizationAsync first.");
+        }
+
+        return await _virtualizedProvider.GetRowsAsync(startRow, count);
+    }
+
+    /// <summary>
+    /// MONITORING: Get performance statistics
+    /// </summary>
+    public PerformanceStatistics GetPerformanceStatistics()
+    {
+        return _virtualizedProvider?.GetPerformanceStatistics() ?? PerformanceStatistics.Create(0, 0, 0, 0);
+    }
+
+    /// <summary>
+    /// CONFIGURATION: Update virtualization configuration
+    /// </summary>
+    public void UpdateVirtualizationConfiguration(VirtualizationConfiguration configuration)
+    {
+        _virtualizationConfig = configuration ?? throw new ArgumentNullException(nameof(configuration));
+        _virtualizedProvider?.UpdateConfiguration(_virtualizationConfig);
+
+        _logger.LogInformation("PERFORMANCE: Virtualization configuration updated");
+    }
+
+    /// <summary>
+    /// OPTIMIZATION: Disable virtualization
+    /// </summary>
+    public void DisableVirtualization()
+    {
+        _virtualizedProvider?.Dispose();
+        _virtualizedProvider = null;
+
+        _logger.LogInformation("PERFORMANCE: Virtualization disabled");
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+
+        _virtualizedProvider?.Dispose();
+        _logger.LogInformation("PERFORMANCE: Optimization engine disposed");
+        _disposed = true;
+    }
+}
