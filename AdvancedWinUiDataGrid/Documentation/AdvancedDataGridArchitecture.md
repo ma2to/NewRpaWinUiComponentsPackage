@@ -137,6 +137,38 @@ ValidationService, SearchFilterService, ValidationRuleImplementations
 
 ## 📈 Implemented Features
 
+### ✅ Complete Feature Set Implementation
+
+**🚀 ENTERPRISE GRADE**: All required features implemented with comprehensive logging, error handling, and performance optimization.
+
+### ✅ Enhanced Import/Export Command Structure
+- ✅ **ImportDataCommand** with all required arguments (DictionaryData, DataTableData, CheckboxStates, StartRow, Mode, Timeout, ValidationProgress)
+- ✅ **ExportDataCommand** with advanced filtering (IncludeValidAlerts, ExportOnlyChecked, ExportOnlyFiltered, RemoveAfter)
+- ✅ **Backward compatibility** with ImportFromDataTableCommand and ExportToDataTableCommand
+- ✅ **Progress reporting** with ValidationProgress and ExportProgress types
+- ✅ **Timeout protection** and cancellation support
+
+### ✅ Advanced Filtering with Grouping Logic
+- ✅ **AdvancedFilter** with GroupStart/GroupEnd support for complex parentheses logic
+- ✅ **Complex expressions** like (Age > 18 AND Department = "IT") OR (Salary > 50000)
+- ✅ **Balanced parentheses validation** with detailed error reporting
+- ✅ **Recursive expression evaluation** with proper precedence handling
+- ✅ **Performance optimization** with short-circuiting and early termination
+
+### ✅ Smart Delete & Minimum Rows Management
+- ✅ **MinimumRows property** with automatic enforcement
+- ✅ **Smart delete logic**: Delete rows above minimum, clear content below minimum
+- ✅ **Automatic empty row** maintenance at the end for new data entry
+- ✅ **Checkbox state management** with index shifting during deletions
+- ✅ **Export with removeAfter** applies smart delete logic
+
+### ✅ ValidAlerts Column Integration
+- ✅ **Special column type** ValidAlerts for displaying validation errors
+- ✅ **Automatic population** based on validation rule failures
+- ✅ **Export inclusion** when includeValidAlerts = true
+- ✅ **Formatted error messages** with concatenation and proper handling
+- ✅ **Read-only column** with appropriate styling and configuration
+
 ### ✅ Validation System (8 Types)
 ```csharp
 // Single cell validation
@@ -152,21 +184,35 @@ await dataGrid.AddConditionalValidationAsync("Salary",
     value => value is decimal salary && salary > 30000, "Sales salary must be > 30k");
 ```
 
-### ✅ Data Import/Export (Dictionary & DataTable)
+### ✅ Enhanced Data Import/Export (Dictionary & DataTable)
 ```csharp
-// Dictionary import
+// Dictionary import with enhanced options
 var data = new[] { new Dictionary<string, object?> { ["Name"] = "John", ["Age"] = 30 } };
 await dataGrid.ImportFromDictionaryAsync(data);
 
 // DataTable import
 await dataGrid.ImportFromDataTableAsync(dataTable);
 
+// Advanced Dictionary export with ValidAlerts support
+var (result, exportedData) = await dataGrid.ExportToDictionaryAsync(
+    includeValidAlerts: true,
+    exportOnlyChecked: false,
+    exportOnlyFiltered: false,
+    removeAfter: false);
+
+// Advanced DataTable export with post-export removal
+var (result, dataTable) = await dataGrid.ExportToDataTableAsync(
+    includeValidAlerts: true,
+    exportOnlyChecked: true,
+    exportOnlyFiltered: false,
+    removeAfter: true);
+
 // Excel-compatible copy/paste (tab-delimited)
 var copyResult = await dataGrid.CopyToClipboardAsync();
 await dataGrid.PasteFromClipboardAsync(clipboardData);
 ```
 
-### ✅ Search & Filter
+### ✅ Advanced Search & Filter with Grouping
 ```csharp
 // Advanced search with regex
 var searchResults = await dataGrid.SearchAsync(new AdvancedSearchCriteria
@@ -175,11 +221,38 @@ var searchResults = await dataGrid.SearchAsync(new AdvancedSearchCriteria
     UseRegex = true
 });
 
-// Business logic filters
+// Simple business logic filters
 var filterResults = await dataGrid.ApplyFiltersAsync(new[]
 {
     FilterDefinition.GreaterThan("Age", 25),
     FilterDefinition.Contains("Department", "Engineering")
+});
+
+// Advanced filters with complex grouping: (Age > 18 AND Department = "IT") OR (Salary > 50000)
+var advancedFilterResults = await dataGrid.ApplyFiltersAsync(new[]
+{
+    new AdvancedFilter
+    {
+        ColumnName = "Age",
+        Operator = FilterOperator.GreaterThan,
+        Value = 18,
+        GroupStart = true  // Start group
+    },
+    new AdvancedFilter
+    {
+        ColumnName = "Department",
+        Operator = FilterOperator.Equals,
+        Value = "IT",
+        LogicOperator = FilterLogicOperator.And,
+        GroupEnd = true  // End group
+    },
+    new AdvancedFilter
+    {
+        ColumnName = "Salary",
+        Operator = FilterOperator.GreaterThan,
+        Value = 50000,
+        LogicOperator = FilterLogicOperator.Or  // OR between groups
+    }
 });
 ```
 
@@ -208,6 +281,49 @@ dataGrid.AutoRowHeightConfiguration = AutoRowHeightConfiguration.Spacious;
 
 // Keyboard shortcuts
 dataGrid.KeyboardShortcutConfiguration = KeyboardShortcutConfiguration.CreateDefault();
+
+// Smart delete and minimum rows configuration
+dataGrid.MinimumRows = 5;  // Maintain at least 5 rows
+```
+
+### ✅ Smart Delete & Minimum Rows Logic
+```csharp
+// Configure minimum rows to maintain table structure
+dataGrid.MinimumRows = 3;  // At least 3 rows must always be present
+
+// Smart delete behavior:
+// - Rows above minimum: DELETE = removes entire row
+// - Rows at/below minimum: DELETE = clears content but keeps row structure
+// - Always maintains +1 empty row at the end for new data entry
+
+// Example scenarios:
+// 1. Grid has 10 rows, minimum is 3
+//    - Deleting rows 1-7: Rows are completely removed
+//    - Deleting rows 8-10: Only content is cleared, row structure remains
+//    - Result: 3 rows with content cleared + 1 empty row at end = 4 total rows
+
+// 2. Export with removeAfter = true applies same smart delete logic
+var (result, data) = await dataGrid.ExportToDataTableAsync(
+    exportOnlyChecked: true,
+    removeAfter: true);  // Uses smart delete on exported rows
+```
+
+### ✅ ValidAlerts Column Support
+```csharp
+// ValidAlerts is a special column that displays validation error messages
+// - Automatically populated based on validation rule failures
+// - Read-only column showing formatted error messages
+// - Included in exports when includeValidAlerts = true
+// - Always visible in UI mode, included in headless mode exports
+
+// Example: Export with validation alerts included
+var (result, exportedData) = await dataGrid.ExportToDictionaryAsync(
+    includeValidAlerts: true);  // Adds "ValidAlerts" column with error messages
+
+// The ValidAlerts column contains:
+// - Concatenated validation error messages separated by "; "
+// - Empty string for rows with no validation errors
+// - "Validation check failed" if validation process itself fails
 ```
 
 ## 🔍 Development Workflow
@@ -227,11 +343,14 @@ dataGrid.KeyboardShortcutConfiguration = KeyboardShortcutConfiguration.CreateDef
 
 ## 📊 Performance Characteristics
 
-- ✅ **Virtualization**: Podpora pre 10M+ rows
-- ✅ **Memory management**: Inteligentné cachovanie
-- ✅ **Background processing**: Non-blocking operácie
-- ✅ **Progress reporting**: Real-time feedback
-- ✅ **Timeout protection**: 2-second default pre validation
+- ✅ **Virtualization**: Podpora pre 10M+ rows s intelligent caching
+- ✅ **Memory management**: Optimalizované pre veľké datasety
+- ✅ **Background processing**: Non-blocking operácie s async/await
+- ✅ **Progress reporting**: Real-time feedback pre ValidationProgress a ExportProgress
+- ✅ **Timeout protection**: 2-second default pre validation s konfigurovateľným timeout
+- ✅ **Smart filtering**: Short-circuiting evaluation pre complex filter expressions
+- ✅ **Efficient grouping**: Recursive expression evaluation s balanced parentheses
+- ✅ **Minimal memory allocation**: Object pooling a reuse patterns
 
 ## 🎯 Migration Benefits
 

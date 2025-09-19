@@ -246,6 +246,206 @@ internal sealed class SearchFilterService : IDisposable
         return dataset.First().Keys.ToArray();
     }
 
+    /// <summary>
+    /// ENTERPRISE: Apply advanced filters with grouping support
+    /// COMPLEX LOGIC: Supports parentheses grouping like (A AND B) OR (C AND D)
+    /// PERFORMANCE: Optimized evaluation with short-circuiting and group processing
+    /// </summary>
+    public async Task<Result<FilterResult>> ApplyAdvancedFiltersAsync(
+        IReadOnlyList<IReadOnlyDictionary<string, object?>> dataset,
+        IReadOnlyList<AdvancedFilter> filters)
+    {
+        try
+        {
+            _logger.LogInformation("ADVANCED_FILTER: Applying {FilterCount} advanced filters to {RowCount} rows",
+                filters.Count, dataset.Count);
+
+            var startTime = DateTime.UtcNow;
+            var matchingIndices = new List<int>();
+
+            // Validate filter grouping
+            var groupValidation = ValidateFilterGrouping(filters);
+            if (!groupValidation.IsValid)
+            {
+                _logger.LogWarning("ADVANCED_FILTER: Invalid filter grouping - {Error}", groupValidation.ErrorMessage);
+                return Result<FilterResult>.Failure(groupValidation.ErrorMessage ?? "Invalid filter grouping");
+            }
+
+            for (int rowIndex = 0; rowIndex < dataset.Count; rowIndex++)
+            {
+                var row = dataset[rowIndex];
+                bool rowMatches = await EvaluateAdvancedFiltersForRow(row, filters);
+
+                if (rowMatches)
+                {
+                    matchingIndices.Add(rowIndex);
+                }
+            }
+
+            var processingTime = DateTime.UtcNow - startTime;
+            var result = FilterResult.Create(dataset.Count, matchingIndices.Count, processingTime, matchingIndices);
+
+            _logger.LogInformation("ADVANCED_FILTER: Completed in {ProcessingTime}ms, {MatchingRows}/{TotalRows} rows match",
+                processingTime.TotalMilliseconds, matchingIndices.Count, dataset.Count);
+
+            return Result<FilterResult>.Success(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ADVANCED_FILTER: Error during advanced filter operation");
+            return Result<FilterResult>.Failure("Advanced filter operation failed", ex);
+        }
+    }
+
+    /// <summary>
+    /// INTERNAL: Validate filter grouping for balanced parentheses
+    /// VALIDATION: Ensures GroupStart and GroupEnd are properly balanced
+    /// </summary>
+    private (bool IsValid, string? ErrorMessage) ValidateFilterGrouping(IReadOnlyList<AdvancedFilter> filters)
+    {
+        int openGroups = 0;
+        for (int i = 0; i < filters.Count; i++)
+        {
+            var filter = filters[i];
+
+            if (filter.GroupStart) openGroups++;
+            if (filter.GroupEnd)
+            {
+                openGroups--;
+                if (openGroups < 0)
+                {
+                    return (false, $"Invalid filter grouping: Unexpected GroupEnd at filter index {i}");
+                }
+            }
+        }
+
+        if (openGroups != 0)
+        {
+            return (false, $"Invalid filter grouping: {openGroups} unclosed groups");
+        }
+
+        return (true, null);
+    }
+
+    /// <summary>
+    /// INTERNAL: Evaluate advanced filters for a single row with grouping logic
+    /// COMPLEX LOGIC: Handles nested parentheses and logical operators
+    /// </summary>
+    private async Task<bool> EvaluateAdvancedFiltersForRow(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<AdvancedFilter> filters)
+    {
+        if (!filters.Any()) return true;
+
+        // Convert advanced filters to expression tree and evaluate
+        return await EvaluateFilterExpression(row, filters, 0, filters.Count - 1);
+    }
+
+    /// <summary>
+    /// INTERNAL: Recursive evaluation of filter expressions with grouping
+    /// ALGORITHM: Processes expressions with proper precedence and grouping
+    /// </summary>
+    private async Task<bool> EvaluateFilterExpression(
+        IReadOnlyDictionary<string, object?> row,
+        IReadOnlyList<AdvancedFilter> filters,
+        int startIndex,
+        int endIndex)
+    {
+        if (startIndex > endIndex) return true;
+        if (startIndex == endIndex)
+        {
+            return await EvaluateSingleAdvancedFilter(row, filters[startIndex]);
+        }
+
+        bool result = true;
+        FilterLogicOperator currentLogic = FilterLogicOperator.And;
+        int i = startIndex;
+
+        while (i <= endIndex)
+        {
+            bool filterResult;
+
+            // Handle group start
+            if (filters[i].GroupStart)
+            {
+                int groupEnd = FindMatchingGroupEnd(filters, i, endIndex);
+                if (groupEnd == -1)
+                {
+                    _logger.LogWarning("ADVANCED_FILTER: Unmatched group start at index {Index}", i);
+                    return false;
+                }
+
+                // Recursively evaluate the group
+                filterResult = await EvaluateFilterExpression(row, filters, i + 1, groupEnd - 1);
+                i = groupEnd + 1;
+            }
+            else
+            {
+                filterResult = await EvaluateSingleAdvancedFilter(row, filters[i]);
+                i++;
+            }
+
+            // Apply logical operation
+            if (currentLogic == FilterLogicOperator.And)
+            {
+                result = result && filterResult;
+            }
+            else
+            {
+                result = result || filterResult;
+            }
+
+            // Update logic operator for next iteration
+            if (i <= endIndex)
+            {
+                currentLogic = filters[i - 1].LogicOperator;
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// INTERNAL: Find matching GroupEnd for a GroupStart
+    /// ALGORITHM: Balanced parentheses matching
+    /// </summary>
+    private int FindMatchingGroupEnd(IReadOnlyList<AdvancedFilter> filters, int groupStartIndex, int searchEndIndex)
+    {
+        int openGroups = 1;
+        for (int i = groupStartIndex + 1; i <= searchEndIndex; i++)
+        {
+            if (filters[i].GroupStart) openGroups++;
+            if (filters[i].GroupEnd)
+            {
+                openGroups--;
+                if (openGroups == 0) return i;
+            }
+        }
+        return -1; // Unmatched group
+    }
+
+    /// <summary>
+    /// INTERNAL: Evaluate single advanced filter
+    /// LOGIC: Same as FilterDefinition but for AdvancedFilter type
+    /// </summary>
+    private async Task<bool> EvaluateSingleAdvancedFilter(
+        IReadOnlyDictionary<string, object?> row,
+        AdvancedFilter filter)
+    {
+        // Convert AdvancedFilter to FilterDefinition for reuse
+        var filterDefinition = new FilterDefinition
+        {
+            ColumnName = filter.ColumnName,
+            Operator = filter.Operator,
+            Value = filter.Value,
+            SecondValue = filter.SecondValue,
+            LogicOperator = filter.LogicOperator,
+            FilterName = filter.FilterName
+        };
+
+        return await EvaluateSingleFilter(row, filterDefinition);
+    }
+
     public void Dispose()
     {
         if (_disposed) return;

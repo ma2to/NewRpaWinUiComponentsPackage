@@ -127,3 +127,83 @@ public sealed record FilterResult
             MatchingRowIndices = matchingIndices ?? Array.Empty<int>()
         };
 }
+
+/// <summary>
+/// PUBLIC API: Advanced filter with grouping support
+/// ENTERPRISE: Support for complex filter grouping with parentheses logic
+/// COMPLEX LOGIC: Enables filters like (Age > 18 AND Department = "IT") OR (Salary > 50000)
+/// </summary>
+public sealed record AdvancedFilter
+{
+    /// <summary>Column name to filter</summary>
+    public string? ColumnName { get; init; }
+
+    /// <summary>Filter operator</summary>
+    public FilterOperator Operator { get; init; }
+
+    /// <summary>Filter value</summary>
+    public object? Value { get; init; }
+
+    /// <summary>Second value for range operations</summary>
+    public object? SecondValue { get; init; }
+
+    /// <summary>Logic operator (AND/OR)</summary>
+    public FilterLogicOperator LogicOperator { get; init; } = FilterLogicOperator.And;
+
+    /// <summary>Start of filter group (opening parenthesis)</summary>
+    public bool GroupStart { get; init; }
+
+    /// <summary>End of filter group (closing parenthesis)</summary>
+    public bool GroupEnd { get; init; }
+
+    /// <summary>Filter name for identification</summary>
+    public string? FilterName { get; init; }
+
+    /// <summary>Create equals filter</summary>
+    public static AdvancedFilter Equals(string columnName, object value, FilterLogicOperator logicOperator = FilterLogicOperator.And, bool groupStart = false, bool groupEnd = false) =>
+        new()
+        {
+            ColumnName = columnName,
+            Operator = FilterOperator.Equals,
+            Value = value,
+            LogicOperator = logicOperator,
+            GroupStart = groupStart,
+            GroupEnd = groupEnd
+        };
+
+    /// <summary>Create contains filter</summary>
+    public static AdvancedFilter Contains(string columnName, string value, FilterLogicOperator logicOperator = FilterLogicOperator.And, bool groupStart = false, bool groupEnd = false) =>
+        new()
+        {
+            ColumnName = columnName,
+            Operator = FilterOperator.Contains,
+            Value = value,
+            LogicOperator = logicOperator,
+            GroupStart = groupStart,
+            GroupEnd = groupEnd
+        };
+
+    /// <summary>Create greater than filter</summary>
+    public static AdvancedFilter GreaterThan(string columnName, object value, FilterLogicOperator logicOperator = FilterLogicOperator.And, bool groupStart = false, bool groupEnd = false) =>
+        new()
+        {
+            ColumnName = columnName,
+            Operator = FilterOperator.GreaterThan,
+            Value = value,
+            LogicOperator = logicOperator,
+            GroupStart = groupStart,
+            GroupEnd = groupEnd
+        };
+
+    /// <summary>Create regex filter</summary>
+    public static AdvancedFilter Regex(string columnName, string pattern, FilterLogicOperator logicOperator = FilterLogicOperator.And, bool groupStart = false, bool groupEnd = false) =>
+        new()
+        {
+            ColumnName = columnName,
+            Operator = FilterOperator.Regex,
+            Value = pattern,
+            LogicOperator = logicOperator,
+            GroupStart = groupStart,
+            GroupEnd = groupEnd
+        };
+}

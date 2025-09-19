@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using RpaWinUiComponentsPackage.AdvancedWinUiDataGrid.Application.API;
 using RpaWinUiComponentsPackage.AdvancedWinUiDataGrid.Core.Interfaces;
 using RpaWinUiComponentsPackage.AdvancedWinUiDataGrid.Core.ValueObjects;
+using RpaWinUiComponentsPackage.AdvancedWinUiDataGrid.Core.Constants;
 using RpaWinUiComponentsPackage.AdvancedWinUiDataGrid.Infrastructure.Services;
 using RpaWinUiComponentsPackage.AdvancedWinUiDataGrid.Infrastructure.Logging;
 
@@ -40,6 +41,11 @@ public sealed class AdvancedDataGrid : UserControl, IDisposable
 
     // Data storage
     private List<IReadOnlyDictionary<string, object?>> _data = new();
+
+    // Smart delete and minimum rows configuration
+    private int _minimumRows = GridConstants.DefaultMinimumRows;
+    private readonly List<int> _filteredRowIndices = new();
+    private readonly Dictionary<int, bool> _checkboxStates = new();
 
     #endregion
 
@@ -364,6 +370,176 @@ public sealed class AdvancedDataGrid : UserControl, IDisposable
         }
     }
 
+    /// <summary>
+    /// ENTERPRISE: Export data to Dictionary collection
+    /// ADVANCED: Support for ValidAlerts inclusion, filtered/checked rows export, and post-export removal
+    /// PERFORMANCE: Optimized for large datasets with progress reporting
+    /// </summary>
+    public async Task<(ExportResult Result, IEnumerable<Dictionary<string, object?>>? Data)> ExportToDictionaryAsync(
+        bool includeValidAlerts = false,
+        bool exportOnlyChecked = false,
+        bool exportOnlyFiltered = false,
+        bool removeAfter = false,
+        TimeSpan? timeout = null,
+        IProgress<ExportProgress>? exportProgress = null)
+    {
+        try
+        {
+            var startTime = DateTime.UtcNow;
+            _logger.LogInformation("EXPORT_DICTIONARY: Starting export - IncludeValidAlerts: {IncludeValidAlerts}, OnlyChecked: {OnlyChecked}, OnlyFiltered: {OnlyFiltered}, RemoveAfter: {RemoveAfter}",
+                includeValidAlerts, exportOnlyChecked, exportOnlyFiltered, removeAfter);
+
+            var command = ExportDataCommand.ToDictionary(
+                includeValidAlerts, exportOnlyChecked, exportOnlyFiltered, removeAfter, timeout, exportProgress);
+
+            var dataToExport = await FilterDataForExport(command);
+            var exportedData = new List<Dictionary<string, object?>>();
+
+            for (int i = 0; i < dataToExport.Count; i++)
+            {
+                var row = dataToExport[i];
+                var exportRow = new Dictionary<string, object?>();
+
+                // Copy all regular columns
+                foreach (var kvp in row)
+                {
+                    exportRow[kvp.Key] = kvp.Value;
+                }
+
+                // Add ValidAlerts column if requested
+                if (includeValidAlerts)
+                {
+                    var validationErrors = await GetRowValidationErrors(i);
+                    exportRow["ValidAlerts"] = string.Join("; ", validationErrors);
+                }
+
+                exportedData.Add(exportRow);
+
+                // Report progress
+                if (exportProgress != null && i % 100 == 0)
+                {
+                    var progress = ExportProgress.Create(i + 1, dataToExport.Count, DateTime.UtcNow - startTime, "Exporting to Dictionary");
+                    exportProgress.Report(progress);
+                }
+            }
+
+            // Remove data after export if requested
+            if (removeAfter)
+            {
+                await RemoveExportedData(command);
+            }
+
+            var exportTime = DateTime.UtcNow - startTime;
+            var result = ExportResult.Success(exportedData.Count, _data.Count, exportTime, ExportFormat.Dictionary);
+
+            _logger.LogInformation("EXPORT_DICTIONARY: Export completed - {ExportedRows} rows in {Time}ms",
+                exportedData.Count, exportTime.TotalMilliseconds);
+
+            return (result, exportedData);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "EXPORT_DICTIONARY: Export failed");
+            var result = ExportResult.Failure(new[] { ex.Message }, TimeSpan.Zero, ExportFormat.Dictionary);
+            return (result, null);
+        }
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Export data to DataTable
+    /// ENTERPRISE INTEGRATION: Perfect for database and enterprise data integration
+    /// ADVANCED: Support for ValidAlerts inclusion, filtered/checked rows export, and post-export removal
+    /// </summary>
+    public async Task<(ExportResult Result, DataTable? Data)> ExportToDataTableAsync(
+        bool includeValidAlerts = false,
+        bool exportOnlyChecked = false,
+        bool exportOnlyFiltered = false,
+        bool removeAfter = false,
+        TimeSpan? timeout = null,
+        IProgress<ExportProgress>? exportProgress = null)
+    {
+        try
+        {
+            var startTime = DateTime.UtcNow;
+            _logger.LogInformation("EXPORT_DATATABLE: Starting export - IncludeValidAlerts: {IncludeValidAlerts}, OnlyChecked: {OnlyChecked}, OnlyFiltered: {OnlyFiltered}, RemoveAfter: {RemoveAfter}",
+                includeValidAlerts, exportOnlyChecked, exportOnlyFiltered, removeAfter);
+
+            var command = ExportDataCommand.ToDataTable(
+                includeValidAlerts, exportOnlyChecked, exportOnlyFiltered, removeAfter, timeout, exportProgress);
+
+            var dataToExport = await FilterDataForExport(command);
+            var dataTable = new DataTable();
+
+            // Create columns based on first row
+            if (dataToExport.Any())
+            {
+                var firstRow = dataToExport.First();
+                foreach (var columnName in firstRow.Keys)
+                {
+                    dataTable.Columns.Add(columnName, typeof(object));
+                }
+
+                // Add ValidAlerts column if requested
+                if (includeValidAlerts)
+                {
+                    dataTable.Columns.Add("ValidAlerts", typeof(string));
+                }
+            }
+
+            // Add data rows
+            for (int i = 0; i < dataToExport.Count; i++)
+            {
+                var sourceRow = dataToExport[i];
+                var dataRow = dataTable.NewRow();
+
+                // Copy regular columns
+                foreach (var columnName in dataTable.Columns.Cast<DataColumn>().Select(c => c.ColumnName))
+                {
+                    if (columnName != "ValidAlerts" && sourceRow.ContainsKey(columnName))
+                    {
+                        dataRow[columnName] = sourceRow[columnName] ?? DBNull.Value;
+                    }
+                }
+
+                // Add ValidAlerts if requested
+                if (includeValidAlerts)
+                {
+                    var validationErrors = await GetRowValidationErrors(i);
+                    dataRow["ValidAlerts"] = string.Join("; ", validationErrors);
+                }
+
+                dataTable.Rows.Add(dataRow);
+
+                // Report progress
+                if (exportProgress != null && i % 100 == 0)
+                {
+                    var progress = ExportProgress.Create(i + 1, dataToExport.Count, DateTime.UtcNow - startTime, "Exporting to DataTable");
+                    exportProgress.Report(progress);
+                }
+            }
+
+            // Remove data after export if requested
+            if (removeAfter)
+            {
+                await RemoveExportedData(command);
+            }
+
+            var exportTime = DateTime.UtcNow - startTime;
+            var result = ExportResult.Success(dataTable.Rows.Count, _data.Count, exportTime, ExportFormat.DataTable);
+
+            _logger.LogInformation("EXPORT_DATATABLE: Export completed - {ExportedRows} rows in {Time}ms",
+                dataTable.Rows.Count, exportTime.TotalMilliseconds);
+
+            return (result, dataTable);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "EXPORT_DATATABLE: Export failed");
+            var result = ExportResult.Failure(new[] { ex.Message }, TimeSpan.Zero, ExportFormat.DataTable);
+            return (result, null);
+        }
+    }
+
     #endregion
 
     #region Search and Filter API
@@ -400,6 +576,36 @@ public sealed class AdvancedDataGrid : UserControl, IDisposable
         catch (Exception ex)
         {
             _logger.LogError(ex, "FILTER: Filter operation failed");
+            return FilterResult.Create(0, 0, TimeSpan.Zero);
+        }
+    }
+
+    /// <summary>
+    /// ENTERPRISE: Apply advanced filters with grouping support
+    /// COMPLEX LOGIC: Supports parentheses grouping like (Age > 18 AND Department = "IT") OR (Salary > 50000)
+    /// PERFORMANCE: Optimized for complex business logic filtering
+    /// </summary>
+    public async Task<FilterResult> ApplyFiltersAsync(IReadOnlyList<AdvancedFilter> filters)
+    {
+        try
+        {
+            _logger.LogInformation("ADVANCED_FILTER: Starting advanced filter operation with {FilterCount} filters", filters.Count);
+            var result = await _searchFilterService.ApplyAdvancedFiltersAsync(_data, filters);
+
+            if (result.IsSuccess)
+            {
+                _logger.LogInformation("ADVANCED_FILTER: Advanced filter operation completed successfully");
+                return result.Value!;
+            }
+            else
+            {
+                _logger.LogWarning("ADVANCED_FILTER: Advanced filter operation failed - {Error}", result.ErrorMessage);
+                return FilterResult.Create(0, 0, TimeSpan.Zero);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "ADVANCED_FILTER: Advanced filter operation failed with exception");
             return FilterResult.Create(0, 0, TimeSpan.Zero);
         }
     }
@@ -525,6 +731,29 @@ public sealed class AdvancedDataGrid : UserControl, IDisposable
         set => _keyboardConfig = value ?? KeyboardShortcutConfiguration.CreateDefault();
     }
 
+    /// <summary>
+    /// CONFIGURATION: Minimum number of rows to maintain in the grid
+    /// SMART DELETE: Rows below this number will have content cleared instead of being deleted
+    /// BUSINESS LOGIC: Ensures table structure is maintained according to business requirements
+    /// </summary>
+    public int MinimumRows
+    {
+        get => _minimumRows;
+        set
+        {
+            if (value < 0)
+                throw new ArgumentException("Minimum rows cannot be negative", nameof(value));
+
+            var oldValue = _minimumRows;
+            _minimumRows = value;
+
+            _logger.LogInformation("CONFIGURATION: MinimumRows changed from {OldValue} to {NewValue}", oldValue, value);
+
+            // Ensure we have at least the minimum number of rows
+            EnsureMinimumRows();
+        }
+    }
+
     #endregion
 
     #region Data Access
@@ -545,6 +774,278 @@ public sealed class AdvancedDataGrid : UserControl, IDisposable
     public IReadOnlyDictionary<string, object?>? GetRowData(int rowIndex)
     {
         return rowIndex >= 0 && rowIndex < _data.Count ? _data[rowIndex] : null;
+    }
+
+    #endregion
+
+    #region Private Helper Methods
+
+    /// <summary>
+    /// INTERNAL: Filter data based on export command criteria
+    /// BUSINESS LOGIC: Handles exportOnlyChecked and exportOnlyFiltered logic
+    /// </summary>
+    private async Task<List<IReadOnlyDictionary<string, object?>>> FilterDataForExport(ExportDataCommand command)
+    {
+        var dataToExport = new List<IReadOnlyDictionary<string, object?>>();
+
+        for (int i = 0; i < _data.Count; i++)
+        {
+            bool includeRow = true;
+
+            // Check if only checked rows should be exported
+            if (command.ExportOnlyChecked)
+            {
+                includeRow = _checkboxStates.TryGetValue(i, out bool isChecked) && isChecked;
+            }
+
+            // Check if only filtered rows should be exported
+            if (includeRow && command.ExportOnlyFiltered)
+            {
+                includeRow = _filteredRowIndices.Contains(i);
+            }
+
+            if (includeRow)
+            {
+                dataToExport.Add(_data[i]);
+            }
+        }
+
+        _logger.LogInformation("EXPORT_FILTER: Filtered {OriginalCount} rows to {FilteredCount} rows for export",
+            _data.Count, dataToExport.Count);
+
+        return dataToExport;
+    }
+
+    /// <summary>
+    /// INTERNAL: Get validation errors for a specific row
+    /// VALIDATION: Returns formatted validation error messages for ValidAlerts column
+    /// </summary>
+    private async Task<IEnumerable<string>> GetRowValidationErrors(int rowIndex)
+    {
+        try
+        {
+            if (rowIndex < 0 || rowIndex >= _data.Count)
+                return Enumerable.Empty<string>();
+
+            var row = _data[rowIndex];
+            var validationResult = await _validationService.ValidateRowAsync(row);
+
+            if (validationResult.IsValid)
+                return Enumerable.Empty<string>();
+
+            return validationResult.Errors.Select(e => e.ErrorMessage);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "VALIDATION: Failed to get validation errors for row {RowIndex}", rowIndex);
+            return new[] { "Validation check failed" };
+        }
+    }
+
+    /// <summary>
+    /// INTERNAL: Remove exported data after export (if removeAfter = true)
+    /// SMART DELETE: Applies smart delete logic based on minimum rows configuration
+    /// </summary>
+    private async Task RemoveExportedData(ExportDataCommand command)
+    {
+        try
+        {
+            _logger.LogInformation("REMOVE_AFTER_EXPORT: Starting removal of exported data");
+
+            var indicesToRemove = new List<int>();
+
+            for (int i = 0; i < _data.Count; i++)
+            {
+                bool shouldRemove = true;
+
+                // Check export criteria to determine which rows were exported
+                if (command.ExportOnlyChecked)
+                {
+                    shouldRemove = _checkboxStates.TryGetValue(i, out bool isChecked) && isChecked;
+                }
+
+                if (shouldRemove && command.ExportOnlyFiltered)
+                {
+                    shouldRemove = _filteredRowIndices.Contains(i);
+                }
+
+                if (shouldRemove)
+                {
+                    indicesToRemove.Add(i);
+                }
+            }
+
+            // Apply smart delete logic
+            await SmartDeleteRows(indicesToRemove);
+
+            _logger.LogInformation("REMOVE_AFTER_EXPORT: Removed {RemovedCount} rows after export", indicesToRemove.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "REMOVE_AFTER_EXPORT: Failed to remove exported data");
+        }
+    }
+
+    /// <summary>
+    /// INTERNAL: Smart delete implementation with minimum rows logic
+    /// BUSINESS LOGIC: Deletes rows above minimum, clears content below minimum
+    /// AUTOMATIC EXPANSION: Maintains +1 empty row at the end
+    /// </summary>
+    private async Task SmartDeleteRows(IEnumerable<int> rowIndices)
+    {
+        try
+        {
+            var sortedIndices = rowIndices.OrderByDescending(i => i).ToList();
+            var deletedCount = 0;
+            var clearedCount = 0;
+
+            _logger.LogInformation("SMART_DELETE: Processing {Count} rows for smart deletion (MinimumRows: {MinimumRows})",
+                sortedIndices.Count, _minimumRows);
+
+            foreach (var rowIndex in sortedIndices)
+            {
+                if (rowIndex < 0 || rowIndex >= _data.Count) continue;
+
+                // Smart delete logic:
+                // If current count > minimum rows: delete the row
+                // If current count <= minimum rows: clear the row content but keep the row
+                if (_data.Count > _minimumRows)
+                {
+                    // Delete the entire row
+                    _data.RemoveAt(rowIndex);
+
+                    // Update checkbox states (shift indices down)
+                    var newCheckboxStates = new Dictionary<int, bool>();
+                    foreach (var kvp in _checkboxStates)
+                    {
+                        if (kvp.Key < rowIndex)
+                        {
+                            newCheckboxStates[kvp.Key] = kvp.Value;
+                        }
+                        else if (kvp.Key > rowIndex)
+                        {
+                            newCheckboxStates[kvp.Key - 1] = kvp.Value;
+                        }
+                        // Skip the deleted row
+                    }
+                    _checkboxStates.Clear();
+                    foreach (var kvp in newCheckboxStates)
+                    {
+                        _checkboxStates[kvp.Key] = kvp.Value;
+                    }
+
+                    deletedCount++;
+                    _logger.LogDebug("SMART_DELETE: Deleted row {RowIndex} (rows above minimum)", rowIndex);
+                }
+                else
+                {
+                    // Clear row content but keep the row structure
+                    var clearedRow = new Dictionary<string, object?>();
+                    if (_data[rowIndex].Count > 0)
+                    {
+                        // Keep column structure but clear values
+                        foreach (var key in _data[rowIndex].Keys)
+                        {
+                            clearedRow[key] = null;
+                        }
+                    }
+                    _data[rowIndex] = clearedRow;
+
+                    // Clear checkbox state for this row
+                    _checkboxStates[rowIndex] = false;
+
+                    clearedCount++;
+                    _logger.LogDebug("SMART_DELETE: Cleared content of row {RowIndex} (at or below minimum)", rowIndex);
+                }
+            }
+
+            // Ensure we always have at least one empty row at the end for new data entry
+            await EnsureEmptyRowAtEnd();
+
+            _logger.LogInformation("SMART_DELETE: Completed - Deleted: {DeletedCount}, Cleared: {ClearedCount}, Final row count: {FinalCount}",
+                deletedCount, clearedCount, _data.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "SMART_DELETE: Failed to perform smart delete operation");
+        }
+    }
+
+    /// <summary>
+    /// INTERNAL: Ensure minimum number of rows are maintained
+    /// BUSINESS LOGIC: Adds empty rows if below minimum
+    /// </summary>
+    private void EnsureMinimumRows()
+    {
+        try
+        {
+            while (_data.Count < _minimumRows)
+            {
+                var emptyRow = new Dictionary<string, object?>();
+
+                // If we have existing data, preserve column structure
+                if (_data.Any())
+                {
+                    var firstRow = _data.FirstOrDefault();
+                    if (firstRow != null)
+                    {
+                        foreach (var key in firstRow.Keys)
+                        {
+                            emptyRow[key] = null;
+                        }
+                    }
+                }
+
+                _data.Add(emptyRow);
+                _logger.LogDebug("MINIMUM_ROWS: Added empty row to maintain minimum ({Current}/{Minimum})",
+                    _data.Count, _minimumRows);
+            }
+
+            // Always ensure one empty row at the end
+            EnsureEmptyRowAtEnd().Wait();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "MINIMUM_ROWS: Failed to ensure minimum rows");
+        }
+    }
+
+    /// <summary>
+    /// INTERNAL: Ensure there's always an empty row at the end for new data
+    /// USER EXPERIENCE: Provides immediate access to add new data
+    /// </summary>
+    private async Task EnsureEmptyRowAtEnd()
+    {
+        try
+        {
+            if (_data.Count == 0)
+            {
+                _data.Add(new Dictionary<string, object?>());
+                _logger.LogDebug("EMPTY_ROW: Added first empty row to empty grid");
+                return;
+            }
+
+            // Check if the last row is empty
+            var lastRow = _data.Last();
+            bool isLastRowEmpty = lastRow.All(kvp => kvp.Value == null ||
+                (kvp.Value is string str && string.IsNullOrWhiteSpace(str)));
+
+            if (!isLastRowEmpty)
+            {
+                // Add a new empty row
+                var emptyRow = new Dictionary<string, object?>();
+                foreach (var key in lastRow.Keys)
+                {
+                    emptyRow[key] = null;
+                }
+                _data.Add(emptyRow);
+                _logger.LogDebug("EMPTY_ROW: Added empty row at end (total rows: {RowCount})", _data.Count);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "EMPTY_ROW: Failed to ensure empty row at end");
+        }
     }
 
     #endregion
